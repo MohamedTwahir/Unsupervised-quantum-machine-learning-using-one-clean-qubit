@@ -32,7 +32,8 @@ Block-encoding (FABLE):
 
 
 
-## Citation A formal citation will be added once the associated paper/proceedings version is published. In the meantime, please reference this repository URL when using the code: - https://github.com/raminsalehi1993/dqc1-entropy-clustering
+## Citation:
+R. Salehi, A. W. Malik, K. Luu, and S. U. Khan, “Unsupervised Quantum Machine Learning Uisng One Clean Qubit,” in SPIE Photonics West, San Francisco, CA, USA, January 2026.
 
 ### FABLE (block-encoding circuits)
 If you use the FABLE block-encoding component, please cite:
