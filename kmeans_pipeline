@@ -1,0 +1,137 @@
+# ============================================================
+# K-means baseline - using k-means clustering algorithm as a baseline  or benchmark model to compare against complex DQC1 full and parzen full pipeline
+#The code works as follows:
+# * gets the number of true classes --> km_K
+# * Run K-means using normalized data --> Xn
+# * Predict cluster labels --> km_labels
+# * evaluate clustering  --> eval_scores
+# * print results  --> print_scores
+
+import matplotlib.pyplot as plt # for plotting
+from sklearn.cluster import KMeans
+import numpy as np
+import os, math, time, warnings
+from sklearn.metrics import (
+    silhouette_score, davies_bouldin_score, calinski_harabasz_score,
+    adjusted_rand_score, normalized_mutual_info_score
+)
+from sklearn.datasets import make_moons
+
+RANDOM_STATE  = int(os.environ.get("RANDOM_STATE", 0))
+
+
+# -------------------- Function for plotting clusters ------------
+def plot_clusters(X, labels, title="Clustering Result"):
+    plt.figure(figsize=(6,5))
+    
+    unique_labels = np.unique(labels)
+    
+    for k in unique_labels:
+        mask = labels == k
+        plt.scatter(X[mask, 0], X[mask, 1], label=f"Cluster {k}")
+    
+    plt.title(title)
+    plt.xlabel("Feature 1")
+    plt.ylabel("Feature 2")
+    plt.legend()
+    plt.show()
+
+# ------------------- comparing ground truth vs kmeans --------------------
+def plot_true_vs_pred(X, y_true, y_pred, title="True vs Pred"):
+    plt.figure(figsize=(10,4))
+    
+    plt.subplot(1,2,1)
+    plt.scatter(X[:,0], X[:,1], c=y_true)
+    plt.title("Ground Truth")
+    
+    plt.subplot(1,2,2)
+    plt.scatter(X[:,0], X[:,1], c=y_pred)
+    plt.title("KMeans Prediction")
+    
+    plt.suptitle(title)
+    plt.show()
+
+# -------------------function to compute cluster entropy/ shannon entropy -------------
+def cluster_entropy(labels):
+    counts = np.bincount(labels)
+    p = counts / counts.sum()
+    p = p[p > 0]
+    H = -np.sum(p * np.log2(p))
+    return H
+
+# ----------------- function to plot shannon entropy -----------------------
+def plot_entropy_bar(H_value, title="Cluster Entropy"):
+    plt.figure()
+    plt.bar([0], [H_value])
+    plt.xticks([0], ["KMeans"])
+    plt.ylabel("Entropy (bits)")
+    plt.title(title)
+    plt.show()
+
+#  ------------------renyi-2 entropy --------------------------
+def renyi2_entropy(labels):
+    counts = np.bincount(labels)
+    p = counts / counts.sum()
+    return -np.log(np.sum(p**2))
+
+# -------------------- Data sets  --------------------
+X, y = make_moons(n_samples=300, noise=0.05, random_state=RANDOM_STATE)
+name = "moons"
+
+
+# ------------------- Data Normalization function ---------------
+def zero_mean_to_unit_interval(X):
+    eps = 1e-12
+    Xc = X - X.mean(axis=0, keepdims=True)
+    m  = np.max(np.abs(Xc), axis=0, keepdims=True)
+    m  = np.where(m < eps, 1.0, m)
+    return Xc / m
+# ---------- function to evaluate and print scores ---------------
+def eval_scores(X, y_true, labels):
+    valid = labels >= 0
+    Xv = X[valid]; lv = labels[valid]
+    K = len(np.unique(lv))
+    if K > 1:
+        sil = silhouette_score(Xv, lv)
+        dbi = davies_bouldin_score(Xv, lv)
+        ch  = calinski_harabasz_score(Xv, lv)
+    else:
+        sil = dbi = ch = np.nan
+    ari = adjusted_rand_score(y_true, labels)
+    nmi = normalized_mutual_info_score(y_true, labels)
+    return dict(ARI=ari, NMI=nmi, Sil=sil, DBI=dbi, CH=ch, K=K)
+
+def print_scores(title, scores):
+    print(f"{title:>24} | K={scores['K']:>2}  "
+          f"ARI={scores['ARI']:.3f}  NMI={scores['NMI']:.3f}  "
+          f"Sil={scores['Sil']:.3f}  DBI={scores['DBI']:.3f}  CH={scores['CH']:.1f}")
+
+
+# -------------------- Data sets  --------------------
+X, y = make_moons(n_samples=300, noise=0.05, random_state=RANDOM_STATE)
+name = "moons"
+
+
+
+ # --------- K-Means baseline ---------------------------
+Xn = zero_mean_to_unit_interval(X)
+km_K = len(np.unique(y))
+km_labels = KMeans(n_clusters=km_K, n_init=20, random_state=RANDOM_STATE).fit_predict(Xn)
+s_km = eval_scores(Xn, y, km_labels)
+print_scores(f"KMeans-{name}", s_km)
+# plotting the clusters
+plot_clusters(Xn, km_labels, f"KMeans Clustering - {name}")
+
+# comparing clusters with ground truth
+plot_true_vs_pred(Xn, y, km_labels, name)
+# shannon entropy
+H_km = cluster_entropy(km_labels)
+print("Cluster Entropy (Shannon):", H_km)
+
+# plot entropy 
+plot_entropy_bar(H_km, f"Entropy - {name}")
+
+# Renyi-2 entropy
+H2_km = renyi2_entropy(km_labels)
+print("Rényi-2 Entropy:", H2_km)
+

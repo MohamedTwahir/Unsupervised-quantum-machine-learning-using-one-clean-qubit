@@ -1,0 +1,26 @@
+import torch as t
+from qiskit import QuantumCircuit, transpile
+from qiskit_aer import AerSimulator
+from qiskit.quantum_info import Statevector
+import numpy as np
+
+DEVICE = "cuda" if t.cuda.is_available() else "cpu"
+DTYPE  = t.float64
+
+# testing karimi feature map function
+def karimi_feature_map(x: np.ndarray) -> QuantumCircuit:
+    x = np.asarray(x, dtype=float)
+    n = len(x)
+    qc = QuantumCircuit(n, name="U_karimi")
+    qc.h(range(n))
+    for i in range(n):
+        qc.rz(2 * np.pi * x[i], i)
+    if n >= 2:
+        for i in range(n):
+            for j in range(i + 1, n):
+                qc.rzz(2 * np.pi * x[i] * x[j], i, j)
+    return qc
+
+x = np.array([0.2, 0.3, 0.7])
+qc = karimi_feature_map(x)
+print(qc)
