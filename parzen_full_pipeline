@@ -1,0 +1,328 @@
+import os, math, time, warnings
+from typing import List, Tuple, Optional, Dict
+from collections import Counter
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+from sklearn.datasets import make_moons, make_circles, make_blobs, fetch_openml
+from sklearn.metrics import pairwise_distances
+from sklearn.metrics import (
+    silhouette_score, davies_bouldin_score, calinski_harabasz_score,
+    adjusted_rand_score, normalized_mutual_info_score
+)
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+# -------------------- Controls (GLOBAL KNOBS) --------------------
+INIT_CLUSTERS = int(os.environ.get("INIT_CLUSTERS", 8)) 
+MIN_CLUSTERS  = int(os.environ.get("MIN_CLUSTERS", 3))
+N_INIT        = int(os.environ.get("N_INIT", 2))
+RANDOM_STATE  = int(os.environ.get("RANDOM_STATE", 0))
+REPEATS       = int(os.environ.get("REPEATS", 2))
+DATA_NOISE    = float(os.environ.get("DATA_NOISE", 0.1))
+print(f"[CONFIG] DATA_NOISE = {DATA_NOISE}")
+
+# Sigma grid for Parzen kernels
+PARZEN_SIGMA_GRID = [float(s) for s in os.environ.get("PARZEN_SIGMA_GRID", "0.06, 0.08, 0.10, 0.12").split(",")]
+
+# -------------------Data sets ----------------------
+n = 300
+noise = DATA_NOISE
+random_state = 0
+X, y = make_moons(
+        n_samples=n,
+        noise=noise,
+        random_state=random_state
+    )
+
+fig, ax2 = plt.subplots()
+# -------------------- Utilities --------------------
+def zero_mean_to_unit_interval(X):
+    eps = 1e-12
+    Xc = X - X.mean(axis=0, keepdims=True)
+    m  = np.max(np.abs(Xc), axis=0, keepdims=True)
+    m  = np.where(m < eps, 1.0, m)
+    return Xc / m
+
+def labels_from_clusters(N, clusters):
+    lab = -np.ones(N, dtype=int)
+    for k, c in enumerate(clusters):
+        lab[np.asarray(c, int)] = k
+    return lab
+
+def eval_scores(X, y_true, labels):
+    valid = labels >= 0
+    Xv = X[valid]; lv = labels[valid]
+    K = len(np.unique(lv))
+    if K > 1:
+        sil = silhouette_score(Xv, lv)
+        dbi = davies_bouldin_score(Xv, lv)
+        ch  = calinski_harabasz_score(Xv, lv)
+    else:
+        sil = dbi = ch = np.nan
+    ari = adjusted_rand_score(y_true, labels)
+    nmi = normalized_mutual_info_score(y_true, labels)
+    return dict(ARI=ari, NMI=nmi, Sil=sil, DBI=dbi, CH=ch, K=K)
+
+def first_large_jump_K(entropy_log):
+    Ks, Bs = zip(*entropy_log)
+    Ks = np.array(Ks); Bs = np.array(Bs)
+    if len(Bs) < 2:
+        return int(Ks[-1])
+    dB = np.diff(Bs)
+    idx = int(np.argmax(dB))
+    return int(Ks[idx])
+
+def print_scores(title, scores):
+    print(f"{title:>24} | K={scores['K']:>2}  "
+          f"ARI={scores['ARI']:.3f}  NMI={scores['NMI']:.3f}  "
+          f"Sil={scores['Sil']:.3f}  DBI={scores['DBI']:.3f}  CH={scores['CH']:.1f}")
+
+
+# ============================================================
+# -------------- Classical Parzen (FULL PIPELINE) -----------
+# ============================================================
+class ParzenRenyi2:
+    """
+    Parzen Rényi-2 pipeline (Jenssen et al.).
+    Provides:
+      • fit_no_reduce(): init + ΔH only
+      • fit_full(): init + ΔH + reduction + K* selection
+    """
+    def __init__(self,
+                 init_clusters: int = INIT_CLUSTERS,
+                 min_clusters: int = MIN_CLUSTERS,
+                 n_init_per_seed: int = N_INIT,
+                 sigma: Optional[float] = None,
+                 random_state: int = RANDOM_STATE):
+        self.K0  = int(init_clusters)
+        self.Kmin = int(min_clusters)
+        self.N_INIT = int(n_init_per_seed)
+
+        if sigma is None:
+            if len(PARZEN_SIGMA_GRID) > 0:
+                self.sigma = float(PARZEN_SIGMA_GRID[0])
+            else:
+                self.sigma = 0.4
+        else:
+            self.sigma = float(sigma)
+
+        self.random_state = int(random_state)
+        self.rng = np.random.RandomState(self.random_state)
+
+    def _precompute(self, X):
+        self.X = zero_mean_to_unit_interval(np.asarray(X, dtype=float))
+        self.N, self.D = self.X.shape
+        self.D2 = pairwise_distances(self.X, self.X, metric="sqeuclidean")
+        self._update_kernel(self.sigma)
+
+    def _update_kernel(self, sigma):
+        self.sigma = float(sigma)
+        self.M = np.exp(-self.D2 / (4.0 * self.sigma * self.sigma))
+        self.CONST = self.D * np.log(2.0 * self.sigma * np.sqrt(np.pi))
+
+    def _H2(self, idxs):
+        idxs = np.asarray(idxs, dtype=int)
+        if idxs.size == 0:
+            return 0.0
+        sub = self.M[np.ix_(idxs, idxs)]
+        J = float(sub.mean())
+        return -np.log(max(J, 1e-300)) + self.CONST
+
+    def _delta_H(self, i, cluster):
+        return self._H2(cluster + [i]) - self._H2(cluster)
+
+    def _min_dist_to_cluster_members(self, unassigned, clusters):
+        U = np.asarray(unassigned, dtype=int)
+        XU = self.X[U]
+        best_i, best_c, best_d2 = None, None, np.inf
+        for c_id, c in enumerate(clusters):
+            A = self.X[np.asarray(c, dtype=int)]
+            d2_min = ((XU[:, None, :] - A[None, :, :])**2).sum(axis=2).min(axis=1)
+            j = int(np.argmin(d2_min))
+            if d2_min[j] < best_d2:
+                best_d2 = float(d2_min[j]); best_i = int(U[j]); best_c = c_id
+        return best_i, best_c
+
+    def _initial_clustering(self):
+        seeds = self.rng.choice(self.N, self.K0, replace=False)
+        clusters = [[int(s)] for s in seeds]
+        unassigned = np.setdiff1d(np.arange(self.N), seeds, assume_unique=True).tolist()
+        while any(len(c) < self.N_INIT for c in clusters) and unassigned:
+            i_star, c_star = self._min_dist_to_cluster_members(unassigned, clusters)
+            clusters[c_star].append(i_star); unassigned.remove(i_star)
+        return clusters, unassigned
+
+    def _label_remaining_by_deltaH(self, clusters, unassigned):
+        while unassigned:
+            i_star, _ = self._min_dist_to_cluster_members(unassigned, clusters)
+            best_k, best_dH = None, float("inf")
+            for k, c in enumerate(clusters):
+                dH = self._delta_H(i_star, c)
+                if dH < best_dH: best_k, best_dH = k, dH
+            clusters[best_k].append(i_star); unassigned.remove(i_star)
+        return clusters
+
+    def _between_entropy(self, clusters):
+        labels = -np.ones(self.N, dtype=int)
+        for k, c in enumerate(clusters): labels[np.asarray(c, dtype=int)] = k
+        exist = labels >= 0
+        diff  = (labels[:, None] != labels[None, :])
+        mask  = exist[:, None] & exist[None, :] & diff
+        num   = float((self.M * mask).sum())
+        Nk    = np.array([len(c) for c in clusters if len(c) > 0], dtype=float)
+        denom = float(2.0 * np.prod(Nk)) if Nk.size > 0 else 1.0
+        V     = num / max(denom, 1e-300)
+        return -np.log(max(V, 1e-300)) + self.CONST
+
+    def _pick_worst_by_between(self, clusters):
+        best_val, best_i = -np.inf, None
+        for i in range(len(clusters)):
+            rem = [clusters[j] for j in range(len(clusters)) if j != i]
+            B = self._between_entropy(rem)
+            if B > best_val: best_val, best_i = B, i
+        return best_i
+
+    def _reduce(self, clusters):
+        self.snapshots = {len(clusters): [list(c) for c in clusters]}
+        self.entropy_log = [(len(clusters), self._between_entropy(clusters))]
+        while len(clusters) > 1:
+            worst_idx = self._pick_worst_by_between(clusters)
+            worst = clusters[worst_idx]
+            remaining = [clusters[i] for i in range(len(clusters)) if i != worst_idx]
+            if worst:
+                means = [self.X[np.asarray(c)].mean(axis=0) if len(c) else np.zeros(self.D) for c in remaining]
+                means = np.asarray(means)
+                W = np.asarray(worst, dtype=int)
+                d2 = ((self.X[W][:, None, :] - means[None, :, :])**2).sum(axis=2)
+                order = np.argsort(d2.min(axis=1))
+                for loc in order:
+                    idx = int(W[loc])
+                    best_k, best_dH = None, float("inf")
+                    for k, c in enumerate(remaining):
+                        dH = self._delta_H(idx, c)
+                        if dH < best_dH:
+                            best_k, best_dH = k, dH
+                    remaining[best_k].append(idx)
+            clusters = remaining
+            self.entropy_log.append((len(clusters), self._between_entropy(clusters)))
+            self.snapshots[len(clusters)] = [list(c) for c in clusters]
+        return clusters
+
+    def _sigma_grid_from_data(self):
+        d = np.sqrt(self.D2[np.triu_indices_from(self.D2, 1)])
+        qs = np.quantile(d, [0.10, 0.25, 0.40, 0.55, 0.70])
+        return np.unique(np.clip(qs/2.0, 1e-6, None))
+
+    def fit_no_reduce(self, X, sigma_grid=None):
+        """
+        Jenssen-style init + ΔH only (no reduction).
+        Uses global defaults when sigma_grid is None.
+        """
+        self._precompute(X)
+        if sigma_grid is None:
+            sigma_grid = PARZEN_SIGMA_GRID if len(PARZEN_SIGMA_GRID) > 0 else [self.sigma]
+        elif not sigma_grid:
+            sigma_grid = [self.sigma]
+        best = None
+        for s in sigma_grid:
+            self._update_kernel(s)
+            cl, un = self._initial_clustering()
+            cl = self._label_remaining_by_deltaH(cl, un)
+            H_sum = sum(self._H2(c) for c in cl)
+            if (best is None) or (H_sum < best[0]):
+                best = (H_sum, s, [list(c) for c in cl])
+        _, self.sigma_, clusters_pre = best
+        self.labels_pre_ = labels_from_clusters(self.N, clusters_pre)
+        self.clusters_pre_ = clusters_pre
+        return self
+
+    def fit_full(self, X, sigma_grid=None, repeats=REPEATS):
+        self._precompute(X)
+        if sigma_grid is None:
+            sigma_grid = self._sigma_grid_from_data()
+        elif not sigma_grid:
+            sigma_grid = [self.sigma]
+        best = None
+        for s in sigma_grid:
+            self._update_kernel(s)
+            for t in range(max(1, repeats)):
+                self.rng = np.random.RandomState(self.random_state + t)
+                cl, un = self._initial_clustering()
+                cl = self._label_remaining_by_deltaH(cl, un)
+                cl = self._reduce(cl)
+                B = self._between_entropy(cl)
+                if (best is None) or (B > best[0]):
+                    best = (B, s, [list(c) for c in cl],
+                            list(self.entropy_log),
+                            {k: [list(cc) for cc in v] for k, v in self.snapshots.items()})
+        B_best, sigma_best, clusters_best, entropy_log, snapshots = best
+        self._update_kernel(sigma_best)
+        Kstar = first_large_jump_K(entropy_log)
+        clusters = snapshots.get(Kstar, clusters_best)
+        self.labels_ = labels_from_clusters(self.N, clusters)
+        self.Kstar_  = Kstar
+        self.sigma_  = sigma_best
+        self.snapshots_ = snapshots
+        self.entropy_log_ = entropy_log
+        self.clusters_ = clusters
+        self.B_best_ = B_best
+        return self
+
+# ---------- Parzen FULL helper ----------
+def parzen_full_labels(X, sigma_grid=None, repeats=REPEATS):
+    """
+    Helper for FULL Parzen pipeline.
+    Uses GLOBAL KNOBS.
+    """
+    if sigma_grid is None:
+        sigma_grid = PARZEN_SIGMA_GRID
+
+    prz = ParzenRenyi2(init_clusters=INIT_CLUSTERS,
+                       min_clusters=MIN_CLUSTERS,
+                       n_init_per_seed=N_INIT,
+                       random_state=RANDOM_STATE)
+
+    print("[PARZEN FULL CONFIG]",
+          f"K0={prz.K0}, Kmin={prz.Kmin}, N_INIT={prz.N_INIT}, "
+          f"sigma_init={prz.sigma}, repeats={repeats}, "
+          f"sigma_grid={sigma_grid}")
+
+    prz.fit_full(X, sigma_grid=sigma_grid, repeats=repeats)
+    return prz.labels_, prz.Kstar_, prz.sigma_
+
+
+# -------------------- Synthetic datasets --------------------
+# For fairness and accuracy i will just stick to moon data set
+# def toy_sets(n=300, noise=None, random_state=0):
+#     if noise is None:
+#         noise = DATA_NOISE 
+    
+#     X, y = make_moons(
+#         n_samples=n,
+#         noise=noise,
+#         random_state=random_state
+#     )
+#     return X, y
+
+
+# --------------------- execution in run-synthetic_and_save -----------------------------
+def run_synthetic_and_save(tag: str, fmap: str = None, kernel_name: str = None):
+    labels_full, Kstar_full, sigma_full = parzen_full_labels(
+            X, sigma_grid=PARZEN_SIGMA_GRID, repeats=REPEATS
+        )
+    Xn = zero_mean_to_unit_interval(X)
+    name= "ParzenRenyi2"
+    s_parzen_full = eval_scores(Xn, y, labels_full)
+    print_scores(f"Parzen-FULL-(Gaussian)-{name} (K*={Kstar_full}, σ={sigma_full:.2f})", s_parzen_full)
+
+    #--------scoring and visualization -----------------
+    ax2.scatter(X[:, 0], X[:, 1], c=labels_full, s=10, cmap="tab10")
+    ax2.set_title(f"Parzen FULL (Gauss) — {name} (K*={Kstar_full}, σ={sigma_full:.2f})", fontsize=11, pad=6); ax2.grid(True, alpha=.3)
+    ax2.set_xlabel("x1"); ax2.set_ylabel("x2")
+
+
+
+run_synthetic_and_save("moons")
+plt.tight_layout()
+plt.show()
