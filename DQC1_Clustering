@@ -46,7 +46,7 @@ REPEATS       = int(os.environ.get("REPEATS", 2))
 RANDOM_STATE  = int(os.environ.get("RANDOM_STATE", 0))
 FEATURE_MAP   = os.environ.get("FEATURE_MAP", "karimi").strip().lower()  # zz|zdiag|rxryrz|pauli|karimi
 LAYERS        = int(os.environ.get("DQC1_LAYERS", 2))
-DATA_NOISE    = float(os.environ.get("DATA_NOISE", 0.5))
+DATA_NOISE    = float(os.environ.get("DATA_NOISE", 0.5)) # tests the limitations of DQC1 
 print(f"[CONFIG] DATA_NOISE = {DATA_NOISE}")
 
 
@@ -85,8 +85,8 @@ DQC1_KERNEL_WORKERS = int(os.environ.get("DQC1_KERNEL_WORKERS", DQC1_GLOBAL_WORK
 DQC1_PURITY_WORKERS = int(os.environ.get("DQC1_PURITY_WORKERS", DQC1_GLOBAL_WORKERS))
 
 # Separate global shot knobs (kernel vs purity can differ)
-DQC1_KERNEL_SHOTS = int(os.environ.get("DQC1_KERNEL_SHOTS", 128))
-DQC1_PURITY_SHOTS = int(os.environ.get("DQC1_PURITY_SHOTS", 128))
+DQC1_KERNEL_SHOTS = int(os.environ.get("DQC1_KERNEL_SHOTS", 128)) # shots means execution of the circuits
+DQC1_PURITY_SHOTS = int(os.environ.get("DQC1_PURITY_SHOTS", 128)) # is there an underlying reason for 128 shots? or for accurate results
 
 # Exact vs sampled modes
 #   DQC1_EXACT_KERNEL = 1 → use statevector for kernel (shots ignored)
@@ -942,10 +942,23 @@ class ParzenRenyi2:
         self.rng = np.random.RandomState(self.random_state)
 
     def _precompute(self, X):
-        self.X = zero_mean_to_unit_interval(np.asarray(X, dtype=float))
-        self.N, self.D = self.X.shape
-        self.D2 = pairwise_distances(self.X, self.X, metric="sqeuclidean")
-        self._update_kernel(self.sigma)
+        """
+        data standardization
+        matrix/ geometry construction
+        kernel initialization
+        _precompute()
+            ↓
+        Distance matrix (D²)
+            ↓
+        Gaussian kernel matrix (M)
+            ↓
+        Entropy engine ready
+
+        """
+        self.X = zero_mean_to_unit_interval(np.asarray(X, dtype=float)) # convert and normalize data
+        self.N, self.D = self.X.shape # store data dimension and number samples for entropy calculations and loop bounds
+        self.D2 = pairwise_distances(self.X, self.X, metric="sqeuclidean") # kernel construction computes distance matrix D2 ​=∥xi​−xj​∥2
+        self._update_kernel(self.sigma) #transforms distances to similarities
 
     def _update_kernel(self, sigma):
         self.sigma = float(sigma)

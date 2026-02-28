@@ -19,17 +19,41 @@ MIN_CLUSTERS  = int(os.environ.get("MIN_CLUSTERS", 3))
 N_INIT        = int(os.environ.get("N_INIT", 2))
 RANDOM_STATE  = int(os.environ.get("RANDOM_STATE", 0))
 REPEATS       = int(os.environ.get("REPEATS", 2))
-DATA_NOISE    = float(os.environ.get("DATA_NOISE", 0.1))
+DATA_NOISE    = float(os.environ.get("DATA_NOISE", 0.6))
 print(f"[CONFIG] DATA_NOISE = {DATA_NOISE}")
 
 # Sigma grid for Parzen kernels
 PARZEN_SIGMA_GRID = [float(s) for s in os.environ.get("PARZEN_SIGMA_GRID", "0.06, 0.08, 0.10, 0.12").split(",")]
 
-# -------------------Data sets ----------------------
+# -------------------Data sets conditions----------------------
 n = 300
 noise = DATA_NOISE
 random_state = 0
-X, y = make_moons(
+# ----------------data set -----------------
+def make_spirals(n_samples=300, noise=0.1, random_state=0):
+    rng = np.random.RandomState(random_state)
+    
+    n = n_samples // 2
+    theta = np.sqrt(rng.rand(n)) * 2 * np.pi  # angle
+    r = 2 * theta + np.pi
+    
+    x1 = r * np.cos(theta)
+    y1 = r * np.sin(theta)
+    
+    x2 = -r * np.cos(theta)
+    y2 = -r * np.sin(theta)
+    
+    X = np.vstack([
+        np.column_stack([x1, y1]),
+        np.column_stack([x2, y2])
+    ])
+    
+    y = np.hstack([np.zeros(n), np.ones(n)])
+    
+    X += noise * rng.randn(*X.shape)
+    
+    return X, y
+X, y = make_spirals(
         n_samples=n,
         noise=noise,
         random_state=random_state
